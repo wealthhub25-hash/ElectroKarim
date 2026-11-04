@@ -7,6 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&family=Changa:wght@500;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
 :root{
   --bg:#12151a; --surface:#1a1f26; --surface2:#20262e; --line:#2a313b;
@@ -56,6 +58,7 @@ main{padding:28px 0 60px}
 .card-form input:focus,.card-form select:focus,.card-form textarea:focus{border-color:var(--teal)}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 20px;border-radius:10px;font-weight:700;font-size:14.5px;border:none;cursor:pointer;font-family:inherit}
 .btn-primary{background:var(--teal);color:#06130f}
+.btn-secondary{background:transparent;border:1px solid var(--line);color:var(--text)}
 .msg{font-size:12px;color:var(--muted);min-height:14px}
 
 .search-row input{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:11px 14px;color:var(--text);font-family:inherit;font-size:14px;margin-bottom:14px}
@@ -127,7 +130,10 @@ footer{border-top:1px solid var(--line);padding:18px 0;padding-bottom:calc(18px 
     <section id="panel-supplies" style="display:none">
       <div class="panel-head">
         <h2 class="display">المشتريات المطلوبة</h2>
-        <span class="count-pill" id="suppliesCount">0 غرض</span>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="count-pill" id="suppliesCount">0 غرض</span>
+          <button class="btn btn-secondary" id="exportPdfBtn" type="button">⬇ تصدير PDF</button>
+        </div>
       </div>
       <div class="layout">
         <form class="card-form" id="supplyForm">
@@ -135,8 +141,8 @@ footer{border-top:1px solid var(--line);padding:18px 0;padding-bottom:calc(18px 
           <input type="text" id="s-name" placeholder="اسم القطعة / الغرض" required>
           <input type="text" id="s-qty" placeholder="الكمية (مثال: 3 شاشات)">
           <select id="s-priority">
-            <option value="normal">أولوية عادية</option>
-            <option value="high">أولوية عالية</option>
+            <option value="عادية">أولوية عادية</option>
+            <option value="عالية">أولوية عالية</option>
           </select>
           <textarea id="s-note" placeholder="ملاحظة (اختياري)"></textarea>
           <button type="submit" class="btn btn-primary">إضافة للائحة</button>
@@ -155,6 +161,32 @@ footer{border-top:1px solid var(--line);padding:18px 0;padding-bottom:calc(18px 
 <footer>إلكترو كريم — صفحة داخلية خاصة بالموظفين</footer>
 
 <script>
+/* ============================================================
+   حط هنا رابط الـ Web app ديال Google Apps Script
+   (شكلو: https://script.google.com/macros/s/XXXXXXXX/exec)
+   ============================================================ */
+const API_URL = "https://script.google.com/macros/s/AKfycbxvH7HgwEem55FZGg14YP7lhdubwb32YRJjQRPpmbET-Q5UCHWz0aGoqpdhUMlbD5XQng/exec";
+
+const REPAIR_SHEET = "اصلاحات";
+const SUPPLY_SHEET = "مشتريات";
+
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+async function apiGet(sheet){
+  const res = await fetch(API_URL + "?sheet=" + encodeURIComponent(sheet));
+  if(!res.ok) throw new Error("fetch failed");
+  return res.json();
+}
+async function apiPost(payload){
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: {"Content-Type": "text/plain;charset=utf-8"},
+    body: JSON.stringify(payload)
+  });
+  if(!res.ok) throw new Error("post failed");
+  return res.json();
+}
+
 document.querySelectorAll('.tab').forEach(function(btn){
   btn.addEventListener('click', function(){
     document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active');});
@@ -162,165 +194,212 @@ document.querySelectorAll('.tab').forEach(function(btn){
     var name = btn.dataset.tab;
     document.getElementById('panel-repairs').style.display = name==='repairs' ? '' : 'none';
     document.getElementById('panel-supplies').style.display = name==='supplies' ? '' : 'none';
+    if(name==='repairs') loadRepairs(); else loadSupplies();
   });
 });
 
-function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+/* ---------------- الإصلاحات ---------------- */
+var allRepairs = [];
+var statusLabel = {"قيد الإصلاح":"قيد الإصلاح","جاهز للاستلام":"جاهز للاستلام","تم التسليم":"تم التسليم"};
 
-(async function(){
-  var db=null;
-  var repairsList=document.getElementById('ticketsList');
-  var suppliesList=document.getElementById('suppliesList');
-  var allRepairs=[], allSupplies=[];
-  var statusLabel={pending:'قيد الإصلاح',ready:'جاهز للاستلام',delivered:'تم التسليم'};
-  var statusCycle={pending:'ready',ready:'delivered',delivered:'pending'};
-
-  function renderRepairs(){
-    var q=(document.getElementById('repairSearch').value||'').trim().toLowerCase();
-    var rows=allRepairs.filter(function(d){
-      if(!q) return true;
-      return ((d.customer||'')+' '+(d.model||'')).toLowerCase().indexOf(q)>-1;
-    });
-    document.getElementById('repairsCount').textContent = allRepairs.length+' تذكرة';
-    if(!rows.length){ repairsList.innerHTML='<div class="empty-state">ما كاين حتى تذكرة</div>'; return; }
-    repairsList.innerHTML = rows.map(function(d){
-      return '<div class="ticket" data-id="'+d.id+'">'+
-        '<div class="main"><b>'+escapeHtml(d.customer||'')+' — '+escapeHtml(d.model||'')+'</b>'+
-        '<span>'+escapeHtml(d.issue||'')+'</span></div>'+
-        '<div class="meta">'+
-        '<span class="price-tag">'+(d.price!=null?d.price+' درهم':'—')+'</span>'+
-        '<select class="badge '+d.status+'" data-action="status">'+
-        '<option value="pending"'+(d.status==='pending'?' selected':'')+'>قيد الإصلاح</option>'+
-        '<option value="ready"'+(d.status==='ready'?' selected':'')+'>جاهز للاستلام</option>'+
-        '<option value="delivered"'+(d.status==='delivered'?' selected':'')+'>تم التسليم</option>'+
-        '</select>'+
-        '<button class="del-btn" data-action="del">حذف</button>'+
-        '</div></div>';
-    }).join('');
+async function loadRepairs(){
+  var list = document.getElementById('ticketsList');
+  try{
+    allRepairs = await apiGet(REPAIR_SHEET);
+    renderRepairs();
+  }catch(err){
+    list.innerHTML = '<div class="empty-state">ماقدرناش نجيبو السجلات. تأكد من رابط الـ API.</div>';
   }
+}
 
-  function renderSupplies(){
-    var q=(document.getElementById('supplySearch').value||'').trim().toLowerCase();
-    var rows=allSupplies.filter(function(d){
-      if(!q) return true;
-      return ((d.name||'')+' '+(d.note||'')).toLowerCase().indexOf(q)>-1;
-    });
-    document.getElementById('suppliesCount').textContent = allSupplies.length+' غرض';
-    if(!rows.length){ suppliesList.innerHTML='<div class="empty-state">ما كاين حتى غرض فاللائحة</div>'; return; }
-    suppliesList.innerHTML = rows.map(function(d){
-      return '<div class="supply-row'+(d.bought?' bought':'')+'" data-id="'+d.id+'">'+
-        '<button class="chk" data-action="toggle">'+(d.bought?'✓':'')+'</button>'+
-        '<div class="main"><b>'+escapeHtml(d.name||'')+(d.qty?' — '+escapeHtml(d.qty):'')+'</b>'+
-        (d.note?'<span>'+escapeHtml(d.note)+'</span>':'')+'</div>'+
-        '<span class="prio '+(d.priority||'normal')+'">'+(d.priority==='high'?'عالية':'عادية')+'</span>'+
-        '<button class="del-btn" data-action="del">حذف</button>'+
-        '</div>';
-    }).join('');
+function renderRepairs(){
+  var list = document.getElementById('ticketsList');
+  var q = (document.getElementById('repairSearch').value || '').trim().toLowerCase();
+  var rows = allRepairs.filter(function(d){
+    if(!q) return true;
+    return ((d["اسم الزبون"]||'') + ' ' + (d["الموديل"]||'')).toLowerCase().indexOf(q) > -1;
+  });
+  document.getElementById('repairsCount').textContent = allRepairs.length + ' تذكرة';
+  if(!rows.length){ list.innerHTML = '<div class="empty-state">ما كاين حتى تذكرة</div>'; return; }
+  list.innerHTML = rows.map(function(d){
+    var status = d["الحالة"] || "قيد الإصلاح";
+    var cls = status === "تم التسليم" ? "delivered" : (status === "جاهز للاستلام" ? "ready" : "pending");
+    return '<div class="ticket" data-row="'+d._row+'">'+
+      '<div class="main"><b>'+escapeHtml(d["اسم الزبون"]||'')+' — '+escapeHtml(d["الموديل"]||'')+'</b>'+
+      '<span>'+escapeHtml(d["وصف العطب"]||'')+'</span></div>'+
+      '<div class="meta">'+
+      '<span class="price-tag">'+(d["الثمن"]!==''&&d["الثمن"]!=null ? d["الثمن"]+' درهم' : '—')+'</span>'+
+      '<select class="badge '+cls+'" data-action="status">'+
+      '<option value="قيد الإصلاح"'+(status==='قيد الإصلاح'?' selected':'')+'>قيد الإصلاح</option>'+
+      '<option value="جاهز للاستلام"'+(status==='جاهز للاستلام'?' selected':'')+'>جاهز للاستلام</option>'+
+      '<option value="تم التسليم"'+(status==='تم التسليم'?' selected':'')+'>تم التسليم</option>'+
+      '</select>'+
+      '<button class="del-btn" data-action="del">حذف</button>'+
+      '</div></div>';
+  }).join('');
+}
+
+document.getElementById('ticketsList').addEventListener('click', async function(e){
+  var btn = e.target.closest('button[data-action="del"]'); if(!btn) return;
+  var row = e.target.closest('.ticket').getAttribute('data-row');
+  if(!confirm('نمسحو هاد التذكرة؟')) return;
+  try{
+    await apiPost({sheet: REPAIR_SHEET, action: "delete", row: Number(row)});
+    loadRepairs();
+  }catch(err){ alert('ماقدرناش نمسحو. عاود جرب.'); }
+});
+document.getElementById('ticketsList').addEventListener('change', async function(e){
+  var sel = e.target.closest('select[data-action="status"]'); if(!sel) return;
+  var row = e.target.closest('.ticket').getAttribute('data-row');
+  try{
+    await apiPost({sheet: REPAIR_SHEET, action: "update", row: Number(row), data: {"الحالة": sel.value}});
+    loadRepairs();
+  }catch(err){ alert('ماقدرناش نديرو التغيير. عاود جرب.'); }
+});
+document.getElementById('repairSearch').addEventListener('input', renderRepairs);
+
+document.getElementById('repairForm').addEventListener('submit', async function(e){
+  e.preventDefault();
+  var msg = document.getElementById('repairMsg');
+  var data = {
+    "اسم الزبون": document.getElementById('r-customer').value.trim(),
+    "الموديل": document.getElementById('r-model').value.trim(),
+    "وصف العطب": document.getElementById('r-issue').value.trim(),
+    "الثمن": document.getElementById('r-price').value ? Number(document.getElementById('r-price').value) : '',
+    "الحالة": "قيد الإصلاح",
+    "تاريخ الإضافة": new Date().toLocaleString('ar-MA')
+  };
+  try{
+    await apiPost({sheet: REPAIR_SHEET, action: "add", data: data});
+    msg.textContent = 'تزادت التذكرة ✓';
+    e.target.reset();
+    loadRepairs();
+    setTimeout(function(){ msg.textContent=''; }, 2000);
+  }catch(err){ msg.textContent = 'ماقدرناش نزيدو. تأكد من رابط الـ API.'; }
+});
+
+/* ---------------- المشتريات ---------------- */
+var allSupplies = [];
+
+async function loadSupplies(){
+  var list = document.getElementById('suppliesList');
+  try{
+    allSupplies = await apiGet(SUPPLY_SHEET);
+    renderSupplies();
+  }catch(err){
+    list.innerHTML = '<div class="empty-state">ماقدرناش نجيبو اللائحة. تأكد من رابط الـ API.</div>';
   }
+}
 
-  repairsList.addEventListener('click', async function(e){
-    var btn=e.target.closest('button'); if(!btn || !db) return;
-    var id=e.target.closest('.ticket').getAttribute('data-id');
-    try{
-      if(btn.dataset.action==='del'){
-        if(confirm('نمسحو هاد التذكرة؟')) await db.collection('repairs').doc(id).delete();
+function renderSupplies(){
+  var list = document.getElementById('suppliesList');
+  var q = (document.getElementById('supplySearch').value || '').trim().toLowerCase();
+  var rows = allSupplies.filter(function(d){
+    if(!q) return true;
+    return ((d["الاسم"]||'') + ' ' + (d["ملاحظة"]||'')).toLowerCase().indexOf(q) > -1;
+  });
+  document.getElementById('suppliesCount').textContent = allSupplies.length + ' غرض';
+  if(!rows.length){ list.innerHTML = '<div class="empty-state">ما كاين حتى غرض فاللائحة</div>'; return; }
+  list.innerHTML = rows.map(function(d){
+    var bought = d["الحالة"] === "تم الشراء";
+    return '<div class="supply-row'+(bought?' bought':'')+'" data-row="'+d._row+'">'+
+      '<button class="chk" data-action="toggle">'+(bought?'✓':'')+'</button>'+
+      '<div class="main"><b>'+escapeHtml(d["الاسم"]||'')+(d["الكمية"]?' — '+escapeHtml(d["الكمية"]):'')+'</b>'+
+      (d["ملاحظة"]?'<span>'+escapeHtml(d["ملاحظة"])+'</span>':'')+'</div>'+
+      '<span class="prio '+(d["الأولوية"]==='عالية'?'high':'normal')+'">'+(d["الأولوية"]||'عادية')+'</span>'+
+      '<button class="del-btn" data-action="del">حذف</button>'+
+      '</div>';
+  }).join('');
+}
+
+document.getElementById('suppliesList').addEventListener('click', async function(e){
+  var btn = e.target.closest('button'); if(!btn) return;
+  var row = e.target.closest('.supply-row').getAttribute('data-row');
+  try{
+    if(btn.dataset.action === 'toggle'){
+      var doc = allSupplies.find(function(x){ return String(x._row) === row; });
+      var newStatus = (doc["الحالة"] === "تم الشراء") ? "لم يشترى بعد" : "تم الشراء";
+      await apiPost({sheet: SUPPLY_SHEET, action: "update", row: Number(row), data: {"الحالة": newStatus}});
+      loadSupplies();
+    } else if(btn.dataset.action === 'del'){
+      if(confirm('نمسحو هاد الغرض من اللائحة؟')){
+        await apiPost({sheet: SUPPLY_SHEET, action: "delete", row: Number(row)});
+        loadSupplies();
       }
-    }catch(err){ alert('ماقدرناش نديرو التغيير. تأكد من الصلاحيات.'); }
-  });
-  repairsList.addEventListener('change', async function(e){
-    var sel=e.target.closest('select[data-action="status"]'); if(!sel || !db) return;
-    var id=e.target.closest('.ticket').getAttribute('data-id');
-    try{
-      await db.collection('repairs').doc(id).update({status: sel.value});
-    }catch(err){ alert('ماقدرناش نديرو التغيير. تأكد من الصلاحيات.'); }
-  });
-  document.getElementById('repairSearch').addEventListener('input', renderRepairs);
-
-  suppliesList.addEventListener('click', async function(e){
-    var btn=e.target.closest('button'); if(!btn || !db) return;
-    var id=e.target.closest('.supply-row').getAttribute('data-id');
-    try{
-      if(btn.dataset.action==='toggle'){
-        var doc=allSupplies.find(function(x){return x.id===id;});
-        await db.collection('supplies').doc(id).update({bought: !doc.bought});
-      } else if(btn.dataset.action==='del'){
-        if(confirm('نمسحو هاد الغرض من اللائحة؟')) await db.collection('supplies').doc(id).delete();
-      }
-    }catch(err){ alert('ماقدرناش نديرو التغيير. تأكد من الصلاحيات.'); }
-  });
-  document.getElementById('supplySearch').addEventListener('input', renderSupplies);
-
-  document.getElementById('repairForm').addEventListener('submit', async function(e){
-    e.preventDefault();
-    var msg=document.getElementById('repairMsg');
-    if(!db){ msg.textContent='الخدمة غير متوفرة حاليا.'; return; }
-    var priceVal=document.getElementById('r-price').value;
-    var data={
-      customer: document.getElementById('r-customer').value.trim(),
-      model: document.getElementById('r-model').value.trim(),
-      issue: document.getElementById('r-issue').value.trim(),
-      price: priceVal? Number(priceVal): null,
-      status: 'pending',
-      createdAt: Date.now()
-    };
-    try{
-      await db.collection('repairs').add(data);
-      msg.textContent='تزادت التذكرة ✓';
-      e.target.reset();
-      setTimeout(function(){msg.textContent='';},2000);
-    }catch(err){ msg.textContent='ماقدرناش نزيدو. تأكد من الصلاحيات ديالك.'; }
-  });
-
-  document.getElementById('supplyForm').addEventListener('submit', async function(e){
-    e.preventDefault();
-    var msg=document.getElementById('supplyMsg');
-    if(!db){ msg.textContent='الخدمة غير متوفرة حاليا.'; return; }
-    var data={
-      name: document.getElementById('s-name').value.trim(),
-      qty: document.getElementById('s-qty').value.trim(),
-      priority: document.getElementById('s-priority').value,
-      note: document.getElementById('s-note').value.trim(),
-      bought: false,
-      createdAt: Date.now()
-    };
-    try{
-      await db.collection('supplies').add(data);
-      msg.textContent='تزاد الغرض ✓';
-      e.target.reset();
-      setTimeout(function(){msg.textContent='';},2000);
-    }catch(err){ msg.textContent='ماقدرناش نزيدو. تأكد من الصلاحيات ديالك.'; }
-  });
-
-  if(window.claude){
-    try{
-      db = await claude.use('db');
-      if(db){
-        var t1=setTimeout(function(){ repairsList.innerHTML='<div class="empty-state">كيتأخر التحميل...</div>'; },10000);
-        db.collection('repairs').orderBy('createdAt','desc').limit(300).onSnapshot(function(snap){
-          clearTimeout(t1);
-          allRepairs = snap.docs.map(function(d){ var v=d.data()||{}; v.id=d.id; return v; });
-          renderRepairs();
-        }, function(err){ repairsList.innerHTML='<div class="empty-state">ماقدرناش نجيبو السجلات.</div>'; });
-
-        var t2=setTimeout(function(){ suppliesList.innerHTML='<div class="empty-state">كيتأخر التحميل...</div>'; },10000);
-        db.collection('supplies').orderBy('createdAt','desc').limit(300).onSnapshot(function(snap){
-          clearTimeout(t2);
-          allSupplies = snap.docs.map(function(d){ var v=d.data()||{}; v.id=d.id; return v; });
-          renderSupplies();
-        }, function(err){ suppliesList.innerHTML='<div class="empty-state">ماقدرناش نجيبو اللائحة.</div>'; });
-      } else {
-        repairsList.innerHTML='<div class="empty-state">خاصك تكون مسجل الدخول باش تشوف السجلات.</div>';
-        suppliesList.innerHTML='<div class="empty-state">خاصك تكون مسجل الدخول باش تشوف اللائحة.</div>';
-      }
-    }catch(e){
-      repairsList.innerHTML='<div class="empty-state">هاد الميزة ماشي متوفرة هنا.</div>';
-      suppliesList.innerHTML='<div class="empty-state">هاد الميزة ماشي متوفرة هنا.</div>';
     }
-  } else {
-    repairsList.innerHTML='<div class="empty-state">هاد الميزة خدامة غير فالنسخة المنشورة.</div>';
-    suppliesList.innerHTML='<div class="empty-state">هاد الميزة خدامة غير فالنسخة المنشورة.</div>';
+  }catch(err){ alert('ماقدرناش نديرو التغيير. عاود جرب.'); }
+});
+document.getElementById('supplySearch').addEventListener('input', renderSupplies);
+
+document.getElementById('supplyForm').addEventListener('submit', async function(e){
+  e.preventDefault();
+  var msg = document.getElementById('supplyMsg');
+  var data = {
+    "الاسم": document.getElementById('s-name').value.trim(),
+    "الكمية": document.getElementById('s-qty').value.trim(),
+    "الأولوية": document.getElementById('s-priority').value,
+    "الحالة": "لم يشترى بعد",
+    "ملاحظة": document.getElementById('s-note').value.trim(),
+    "تاريخ الإضافة": new Date().toLocaleString('ar-MA')
+  };
+  try{
+    await apiPost({sheet: SUPPLY_SHEET, action: "add", data: data});
+    msg.textContent = 'تزاد الغرض ✓';
+    e.target.reset();
+    loadSupplies();
+    setTimeout(function(){ msg.textContent=''; }, 2000);
+  }catch(err){ msg.textContent = 'ماقدرناش نزيدو. تأكد من رابط الـ API.'; }
+});
+
+/* ---------------- تصدير PDF ---------------- */
+document.getElementById('exportPdfBtn').addEventListener('click', async function(){
+  if(!window.jspdf || !window.html2canvas){ alert('الأدوات مازال كتتحمل، عاود بعد شوية.'); return; }
+  var items = allSupplies;
+  var container = document.createElement('div');
+  container.style.cssText = 'width:700px;padding:30px;background:#fff;color:#111;font-family:Tajawal,sans-serif;direction:rtl;position:fixed;top:-9999px;left:-9999px;';
+  var rowsHtml = items.map(function(d,i){
+    return '<tr style="border-bottom:1px solid #ddd;">'+
+      '<td style="padding:8px;text-align:right;">'+(i+1)+'</td>'+
+      '<td style="padding:8px;text-align:right;">'+escapeHtml(d["الاسم"]||'')+'</td>'+
+      '<td style="padding:8px;text-align:right;">'+escapeHtml(d["الكمية"]||'')+'</td>'+
+      '<td style="padding:8px;text-align:right;">'+(d["الأولوية"]||'عادية')+'</td>'+
+      '<td style="padding:8px;text-align:right;">'+(d["الحالة"]||'لم يشترى بعد')+'</td>'+
+      '<td style="padding:8px;text-align:right;">'+escapeHtml(d["ملاحظة"]||'')+'</td>'+
+    '</tr>';
+  }).join('');
+  container.innerHTML =
+    '<h2 style="font-size:20px;margin-bottom:4px;">إلكترو كريم — لائحة المشتريات المطلوبة</h2>'+
+    '<div style="font-size:12px;color:#666;margin-bottom:16px;">'+new Date().toLocaleDateString('ar-MA')+'</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:13px;">'+
+    '<thead><tr style="border-bottom:2px solid #111;"><th style="padding:8px;text-align:right;">#</th><th style="padding:8px;text-align:right;">الغرض</th><th style="padding:8px;text-align:right;">الكمية</th><th style="padding:8px;text-align:right;">الأولوية</th><th style="padding:8px;text-align:right;">الحالة</th><th style="padding:8px;text-align:right;">ملاحظة</th></tr></thead>'+
+    '<tbody>'+(rowsHtml || '<tr><td colspan="6" style="padding:12px;text-align:center;color:#999;">ما كاين حتى غرض</td></tr>')+'</tbody>'+
+    '</table>';
+  document.body.appendChild(container);
+  try{
+    var canvas = await html2canvas(container, {scale:2, backgroundColor:'#ffffff'});
+    var imgData = canvas.toDataURL('image/png');
+    var jsPDFLib = window.jspdf.jsPDF;
+    var pdf = new jsPDFLib({unit:'pt', format:'a4'});
+    var pageWidth = pdf.internal.pageSize.getWidth();
+    var pageHeight = pdf.internal.pageSize.getHeight();
+    var imgW = pageWidth - 40;
+    var imgH = canvas.height * imgW / canvas.width;
+    if(imgH > pageHeight - 40){ imgH = pageHeight - 40; imgW = canvas.width*imgH/canvas.height; }
+    pdf.addImage(imgData, 'PNG', 20, 20, imgW, imgH);
+    pdf.save('مشتريات-الكترو-كريم.pdf');
+  }catch(err){
+    alert('ماقدرناش ندير PDF. عاود جرب.');
+  } finally {
+    document.body.removeChild(container);
   }
-})();
+});
+
+/* ---------------- تحميل أولي + تحديث دوري ---------------- */
+loadRepairs();
+setInterval(function(){
+  var active = document.querySelector('.tab.active').dataset.tab;
+  if(active === 'repairs') loadRepairs(); else loadSupplies();
+}, 20000);
 </script>
 </body>
 </html>
